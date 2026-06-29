@@ -149,6 +149,55 @@ function suggestWeight(exKey,lastLog){
 }
 
 // ============================================================
+//  CARDIO HELPERS
+// ============================================================
+const CARDIO_TYPES={
+  row:{label:"Rower",icon:"🚣",unit:"m",hasDistance:true,paceLabel:"/500m"},
+  bike:{label:"Assault Bike",icon:"🚴",unit:"cal",hasDistance:false,paceLabel:""},
+  run:{label:"Run",icon:"🏃",unit:"m",hasDistance:true,paceLabel:"/km"},
+  other:{label:"Zone 2 / Other",icon:"🔥",unit:"",hasDistance:false,paceLabel:""},
+};
+// program benchmarks to chase
+const CARDIO_BENCHMARKS=[
+  {type:"run",meters:5000,label:"5K Run",goalSec:null,note:"Run nonstop (Wk 8)"},
+  {type:"row",meters:2000,label:"2K Row",goalSec:480,note:"Sub-8:00 (Wk 12)"},
+  {type:"row",meters:5000,label:"5K Row",goalSec:null,note:"Benchmark row"},
+];
+function parseTime(str){
+  if(str===""||str==null)return 0;
+  const parts=String(str).trim().split(":").map(Number);
+  if(parts.some(isNaN))return 0;
+  if(parts.length===1)return Math.round(parts[0]*60); // bare = minutes
+  if(parts.length===2)return parts[0]*60+parts[1];
+  if(parts.length===3)return parts[0]*3600+parts[1]*60+parts[2];
+  return 0;
+}
+function fmtTime(sec){
+  sec=Math.round(sec||0);
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+  if(h>0)return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  return `${m}:${String(s).padStart(2,"0")}`;
+}
+function fmtMin(sec){return Math.round((sec||0)/60);}
+function cardioPace(type,meters,sec){
+  if(!meters||!sec)return null;
+  if(type==="row")return fmtTime(sec/(meters/500))+" /500m";
+  if(type==="run")return fmtTime(sec/(meters/1000))+" /km";
+  return null;
+}
+function bestEffort(cardio,type,meters){
+  const m=cardio.filter(s=>s.type===type&&s.meters===meters&&s.sec>0);
+  if(!m.length)return null;
+  return m.reduce((a,b)=>b.sec<a.sec?b:a);
+}
+// ISO-ish week key for grouping
+function weekKey(ts){
+  const d=new Date(ts);const onejan=new Date(d.getFullYear(),0,1);
+  const wk=Math.ceil((((d-onejan)/86400000)+onejan.getDay()+1)/7);
+  return `${d.getFullYear()}-W${String(wk).padStart(2,"0")}`;
+}
+
+// ============================================================
 //  STORAGE HOOK  (browser localStorage — persists on this device)
 // ============================================================
 const LS_PREFIX="edge:";
@@ -162,6 +211,7 @@ function useStore(){
   const [logs,setLogs]=useState({});       // {logKey: session}
   const [overrides,setOverrides]=useState({}); // {exKey: weight}
   const [progress,setProgress]=useState({week:0});
+  const [cardio,setCardio]=useState([]);   // [{id,type,ts,sec,meters,note}]
 
   useEffect(()=>{
     try{
@@ -172,6 +222,7 @@ function useStore(){
       setLogs(lg);
       const ov=lsGet("overrides");if(ov)setOverrides(ov);
       const pr=lsGet("progress");if(pr)setProgress(pr);
+      const cd=lsGet("cardio");if(cd&&Array.isArray(cd))setCardio(cd);
     }catch(e){/* localStorage unavailable: run in-memory */}
     setReady(true);
   },[]);
@@ -186,12 +237,18 @@ function useStore(){
   const saveProgress=useCallback((pr)=>{
     setProgress(pr);lsSet("progress",pr);
   },[]);
+  const addCardio=useCallback((session)=>{
+    setCardio(p=>{const n=[...p,{...session,id:Date.now()}];lsSet("cardio",n);return n;});
+  },[]);
+  const deleteCardio=useCallback((id)=>{
+    setCardio(p=>{const n=p.filter(s=>s.id!==id);lsSet("cardio",n);return n;});
+  },[]);
   const resetAll=useCallback(()=>{
     lsAllKeys().forEach(k=>lsRemove(k));
-    setLogs({});setOverrides({});setProgress({week:0});
+    setLogs({});setOverrides({});setProgress({week:0});setCardio([]);
   },[]);
 
-  return{ready,logs,overrides,progress,saveLog,saveOverride,saveProgress,resetAll};
+  return{ready,logs,overrides,progress,cardio,saveLog,saveOverride,saveProgress,addCardio,deleteCardio,resetAll};
 }
 
 // most recent prior log for an exercise, scanning backwards from a given week/day
@@ -218,9 +275,10 @@ const F={head:"'Barlow Condensed',sans-serif",body:"'Inter',sans-serif"};
 // ============================================================
 export default function App(){
   const store=useStore();
-  const [tab,setTab]=useState("train"); // train | progress | settings
+  const [tab,setTab]=useState("train"); // train | cardio | progress | settings
   const [navWeek,setNavWeek]=useState(1);
   const [navDay,setNavDay]=useState(0);
+  const [cardioPrefill,setCardioPrefill]=useState(null); // {type} when jumping from a workout day
 
   // inject fonts once
   useEffect(()=>{
@@ -239,7 +297,8 @@ export default function App(){
   return (
     <div style={{background:C.bg,color:C.text,minHeight:"100vh",fontFamily:F.body,paddingBottom:72}}>
       <Header/>
-      {tab==="train"&&<TrainTab store={store} navWeek={navWeek} navDay={navDay} setNavWeek={setNavWeek} setNavDay={setNavDay}/>}
+      {tab==="train"&&<TrainTab store={store} navWeek={navWeek} navDay={navDay} setNavWeek={setNavWeek} setNavDay={setNavDay} goLogCardio={(type)=>{setCardioPrefill({type});setTab("cardio");}}/>}
+      {tab==="cardio"&&<CardioTab store={store} prefill={cardioPrefill} clearPrefill={()=>setCardioPrefill(null)}/>}
       {tab==="progress"&&<ProgressTab store={store}/>}
       {tab==="settings"&&<SettingsTab store={store}/>}
       <BottomNav tab={tab} setTab={setTab}/>
@@ -257,7 +316,7 @@ function Header(){
 }
 
 // ---------- TRAIN TAB ----------
-function TrainTab({store,navWeek,navDay,setNavWeek,setNavDay}){
+function TrainTab({store,navWeek,navDay,setNavWeek,setNavDay,goLogCardio}){
   const phase=PROGRAM.phases.find(ph=>ph.weekList.some(w=>w.week===navWeek));
   const wk=phase.weekList.find(w=>w.week===navWeek);
   const day=wk.days[navDay];
@@ -289,12 +348,20 @@ function TrainTab({store,navWeek,navDay,setNavWeek,setNavDay}){
         ))}
       </div>
       {/* Day workout */}
-      <DayWorkout key={`${navWeek}-${navDay}`} store={store} week={navWeek} dayIndex={navDay} day={day} deload={wk.deload}/>
+      <DayWorkout key={`${navWeek}-${navDay}`} store={store} week={navWeek} dayIndex={navDay} day={day} deload={wk.deload} goLogCardio={goLogCardio}/>
     </div>
   );
 }
 
-function DayWorkout({store,week,dayIndex,day,deload}){
+function DayWorkout({store,week,dayIndex,day,deload,goLogCardio}){
+  // guess a cardio type from the scheduled note text
+  const guessType=(txt)=>{
+    const t=(txt||"").toLowerCase();
+    if(t.includes("row"))return "row";
+    if(t.includes("bike")||t.includes("assault"))return "bike";
+    if(t.includes("run"))return "run";
+    return "other";
+  };
   return (
     <div style={{padding:"14px 16px"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}}>
@@ -308,7 +375,11 @@ function DayWorkout({store,week,dayIndex,day,deload}){
       ))}
       {day.cardio&&(
         <div style={{background:C.greenDim,border:`1px solid ${C.green}33`,borderRadius:8,padding:"12px 14px",marginTop:8,fontSize:13,lineHeight:1.5}}>
-          <strong style={{color:C.green}}>Cardio</strong> — {day.cardio}
+          <div><strong style={{color:C.green}}>Cardio</strong> — {day.cardio}</div>
+          <button onClick={()=>goLogCardio&&goLogCardio(guessType(day.cardio))}
+            style={{marginTop:10,background:C.green,color:"#06210f",border:"none",borderRadius:7,padding:"8px 14px",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:F.head,textTransform:"uppercase",letterSpacing:"0.05em"}}>
+            Log this session
+          </button>
         </div>
       )}
     </div>
@@ -483,6 +554,209 @@ function ProgressTab({store}){
   );
 }
 
+// ---------- CARDIO TAB ----------
+function CardioTab({store,prefill,clearPrefill}){
+  const [form,setForm]=useState(()=>({
+    type:prefill?.type||"row",
+    minutes:"",
+    seconds:"",
+    distance:"",
+    distUnit:"m",
+    note:"",
+  }));
+  const [showForm,setShowForm]=useState(!!prefill);
+
+  useEffect(()=>{
+    if(prefill?.type){setForm(f=>({...f,type:prefill.type}));setShowForm(true);clearPrefill&&clearPrefill();}
+  // eslint-disable-next-line
+  },[prefill]);
+
+  const cfg=CARDIO_TYPES[form.type];
+  const sessions=useMemo(()=>[...store.cardio].sort((a,b)=>b.ts-a.ts),[store.cardio]);
+  const [pbBanner,setPbBanner]=useState(null); // {label,time,pace} when a PB is set
+
+  const save=()=>{
+    const sec=parseTime(`${form.minutes||0}:${String(form.seconds||0).padStart(2,"0")}`);
+    let meters=0;
+    if(cfg.hasDistance&&form.distance!==""){
+      const d=Number(form.distance);
+      meters=form.distUnit==="km"?d*1000:form.distUnit==="mi"?Math.round(d*1609.34):d;
+    }
+    if(sec<=0&&meters<=0&&!form.note)return; // nothing to save
+    // PB check: only for timed efforts at a real distance, against prior sessions at the same type+distance
+    let pb=null;
+    if(sec>0&&meters>0){
+      const prior=bestEffort(store.cardio,form.type,meters); // best BEFORE this one
+      if(!prior||sec<prior.sec){
+        // only celebrate if there was a prior to beat, OR it matches a named benchmark distance
+        const bench=CARDIO_BENCHMARKS.find(b=>b.type===form.type&&b.meters===meters);
+        if(prior||bench){
+          const label=bench?bench.label:(meters>=1000?(meters/1000)+"km ":meters+"m ")+CARDIO_TYPES[form.type].label;
+          pb={label,time:fmtTime(sec),pace:cardioPace(form.type,meters,sec),improved:prior?fmtTime(prior.sec-sec):null};
+        }
+      }
+    }
+    store.addCardio({type:form.type,ts:Date.now(),sec,meters,note:form.note.trim()});
+    setForm({type:form.type,minutes:"",seconds:"",distance:"",distUnit:form.distUnit,note:""});
+    setShowForm(false);
+    if(pb){setPbBanner(pb);setTimeout(()=>setPbBanner(null),6000);}
+  };
+
+  // weekly minutes chart data
+  const weekly=useMemo(()=>{
+    const map={};
+    store.cardio.forEach(s=>{const k=weekKey(s.ts);map[k]=(map[k]||0)+(s.sec||0)/60;});
+    return Object.entries(map).sort((a,b)=>a[0]<b[0]?-1:1).map(([k,v])=>({label:k.split("-W")[1]?("W"+k.split("-W")[1]):k,min:Math.round(v)}));
+  },[store.cardio]);
+
+  const totalMin=useMemo(()=>Math.round(store.cardio.reduce((s,c)=>s+(c.sec||0)/60,0)),[store.cardio]);
+  const totalSessions=store.cardio.length;
+
+  return (
+    <div style={{padding:"16px"}}>
+      <div style={{fontFamily:F.head,fontWeight:900,fontSize:26,textTransform:"uppercase",marginBottom:4}}>Cardio</div>
+      <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Log your runs, rows, and bike sessions. Track minutes, pace, and your best efforts against the program benchmarks.</div>
+
+      {pbBanner&&(
+        <div style={{background:"linear-gradient(135deg,rgba(244,101,26,0.18),rgba(34,197,94,0.18))",border:`1px solid ${C.orange}`,borderRadius:12,padding:"16px",marginBottom:16,position:"relative",overflow:"hidden"}}>
+          <div style={{fontSize:30,marginBottom:4}}>🏆</div>
+          <div style={{fontFamily:F.head,fontWeight:900,fontSize:22,textTransform:"uppercase",color:C.orange,letterSpacing:"0.02em"}}>New Personal Best!</div>
+          <div style={{fontSize:14,marginTop:4}}>
+            <strong>{pbBanner.label}</strong> — {pbBanner.time}{pbBanner.pace?` · ${pbBanner.pace}`:""}
+          </div>
+          {pbBanner.improved&&<div style={{fontSize:13,color:C.green,marginTop:4,fontWeight:600}}>↓ {pbBanner.improved} faster than your old best</div>}
+          <button onClick={()=>setPbBanner(null)} style={{position:"absolute",top:12,right:12,background:"none",border:"none",color:C.muted,fontSize:18,cursor:"pointer"}}>×</button>
+        </div>
+      )}
+
+      {/* Summary pills */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontFamily:F.head,fontWeight:700,fontSize:26,color:C.green}}>{totalMin}</div>
+          <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:C.muted}}>Total Minutes</div>
+        </div>
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontFamily:F.head,fontWeight:700,fontSize:26,color:C.text}}>{totalSessions}</div>
+          <div style={{fontSize:11,textTransform:"uppercase",letterSpacing:"0.08em",color:C.muted}}>Sessions Logged</div>
+        </div>
+      </div>
+
+      {/* Log button / form */}
+      {!showForm?(
+        <button onClick={()=>setShowForm(true)} style={{width:"100%",background:C.green,color:"#06210f",border:"none",borderRadius:10,padding:"14px",fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:F.head,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:16}}>+ Log Cardio Session</button>
+      ):(
+        <div style={{background:C.card,border:`1px solid ${C.green}55`,borderRadius:10,padding:16,marginBottom:16}}>
+          <div style={{fontFamily:F.head,fontWeight:700,fontSize:16,textTransform:"uppercase",marginBottom:12}}>New Session</div>
+          {/* type selector */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            {Object.entries(CARDIO_TYPES).map(([k,v])=>(
+              <button key={k} onClick={()=>setForm(f=>({...f,type:k}))} style={{background:form.type===k?C.greenDim:C.surface,border:`1px solid ${form.type===k?C.green:C.border}`,color:form.type===k?C.green:C.muted,borderRadius:8,padding:"10px",cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                <span>{v.icon}</span>{v.label}
+              </button>
+            ))}
+          </div>
+          {/* duration */}
+          <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Duration</div>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12}}>
+            <input inputMode="numeric" placeholder="min" value={form.minutes} onChange={e=>setForm(f=>({...f,minutes:e.target.value}))}
+              style={{flex:1,background:C.surface,border:`1px solid ${C.border}`,color:C.text,borderRadius:6,padding:"10px",fontSize:15,textAlign:"center"}}/>
+            <span style={{color:C.muted,fontWeight:700}}>:</span>
+            <input inputMode="numeric" placeholder="sec" value={form.seconds} onChange={e=>setForm(f=>({...f,seconds:e.target.value}))}
+              style={{flex:1,background:C.surface,border:`1px solid ${C.border}`,color:C.text,borderRadius:6,padding:"10px",fontSize:15,textAlign:"center"}}/>
+          </div>
+          {/* distance (optional, for row/run) */}
+          {cfg.hasDistance&&(
+            <>
+              <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Distance <span style={{textTransform:"none"}}>(optional — unlocks pace & benchmarks)</span></div>
+              <div style={{display:"flex",gap:8,marginBottom:12}}>
+                <input inputMode="numeric" placeholder="0" value={form.distance} onChange={e=>setForm(f=>({...f,distance:e.target.value}))}
+                  style={{flex:1,background:C.surface,border:`1px solid ${C.border}`,color:C.text,borderRadius:6,padding:"10px",fontSize:15,textAlign:"center"}}/>
+                {["m","km","mi"].map(u=>(
+                  <button key={u} onClick={()=>setForm(f=>({...f,distUnit:u}))} style={{background:form.distUnit===u?C.orangeDim:C.surface,border:`1px solid ${form.distUnit===u?C.orange:C.border}`,color:form.distUnit===u?C.orange:C.muted,borderRadius:6,padding:"0 14px",cursor:"pointer",fontSize:13,fontWeight:600}}>{u}</button>
+                ))}
+              </div>
+            </>
+          )}
+          {/* note */}
+          <input placeholder="Note (optional) — e.g. Zone 2, felt strong" value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))}
+            style={{width:"100%",background:C.surface,border:`1px solid ${C.border}`,color:C.text,borderRadius:6,padding:"10px",fontSize:14,marginBottom:12,boxSizing:"border-box"}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={save} style={{flex:1,background:C.green,color:"#06210f",border:"none",borderRadius:8,padding:"11px",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:F.head,textTransform:"uppercase",letterSpacing:"0.05em"}}>Save Session</button>
+            <button onClick={()=>setShowForm(false)} style={{background:C.surface,color:C.muted,border:`1px solid ${C.border}`,borderRadius:8,padding:"11px 16px",fontSize:14,cursor:"pointer"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Benchmarks */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",marginBottom:16}}>
+        <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`,fontFamily:F.head,fontWeight:700,fontSize:15,textTransform:"uppercase"}}>Benchmark Bests</div>
+        {CARDIO_BENCHMARKS.map((b,i)=>{
+          const best=bestEffort(store.cardio,b.type,b.meters);
+          const hit=best&&b.goalSec&&best.sec<=b.goalSec;
+          return (
+            <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 14px",borderBottom:i<CARDIO_BENCHMARKS.length-1?`1px solid ${C.border}`:"none"}}>
+              <div>
+                <div style={{fontSize:14,fontWeight:600,display:"flex",alignItems:"center",gap:7}}>{CARDIO_TYPES[b.type].icon} {b.label}{hit&&<span style={{color:C.green,fontSize:12}}>✓ goal</span>}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>{b.note}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontFamily:F.head,fontWeight:700,fontSize:18,color:best?C.orange:C.muted}}>{best?fmtTime(best.sec):"—"}</div>
+                {best&&<div style={{fontSize:10,color:C.muted}}>{cardioPace(b.type,b.meters,best.sec)}</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Weekly minutes chart */}
+      {weekly.length>0&&(
+        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 8px 8px",marginBottom:16}}>
+          <div style={{fontFamily:F.head,fontWeight:700,fontSize:15,textTransform:"uppercase",padding:"0 8px",marginBottom:8}}>Weekly Minutes</div>
+          <ResponsiveContainer width="100%" height={180}>
+            <LineChart data={weekly} margin={{top:5,right:12,left:-12,bottom:0}}>
+              <CartesianGrid stroke={C.border} strokeDasharray="3 3"/>
+              <XAxis dataKey="label" stroke={C.muted} fontSize={11}/>
+              <YAxis stroke={C.muted} fontSize={11}/>
+              <Tooltip contentStyle={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,color:C.text}} labelStyle={{color:C.muted}}/>
+              <Line type="monotone" dataKey="min" stroke={C.green} strokeWidth={2} dot={{r:3}} name="Minutes"/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Recent sessions */}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden"}}>
+        <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`,fontFamily:F.head,fontWeight:700,fontSize:15,textTransform:"uppercase"}}>Recent Sessions</div>
+        {sessions.length===0?(
+          <div style={{padding:"24px 16px",textAlign:"center",color:C.muted,fontSize:13}}>No cardio logged yet.<br/>Tap “Log Cardio Session” above to start.</div>
+        ):sessions.slice(0,20).map((s)=>{
+          const cfg=CARDIO_TYPES[s.type]||CARDIO_TYPES.other;
+          const pace=cardioPace(s.type,s.meters,s.sec);
+          const d=new Date(s.ts);
+          return (
+            <div key={s.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",borderBottom:`1px solid ${C.border}`}}>
+              <span style={{fontSize:20}}>{cfg.icon}</span>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  {cfg.label}
+                  {s.meters>0&&<span style={{color:C.muted,fontWeight:400}}> · {s.meters>=1000?(s.meters/1000)+"km":s.meters+"m"}</span>}
+                </div>
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>
+                  {d.toLocaleDateString(undefined,{month:"short",day:"numeric"})}
+                  {s.sec>0&&` · ${fmtTime(s.sec)}`}
+                  {pace&&` · ${pace}`}
+                  {s.note&&` · ${s.note}`}
+                </div>
+              </div>
+              <button onClick={()=>store.deleteCardio(s.id)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:16,padding:4}}>×</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ---------- SETTINGS TAB ----------
 function SettingsTab({store}){
   const big=["bench","squat","deadlift","ohp","bbRow","weightedPull"];
@@ -529,7 +803,7 @@ function SettingsTab({store}){
 
 // ---------- BOTTOM NAV ----------
 function BottomNav({tab,setTab}){
-  const items=[["train","🏋️","Train"],["progress","📈","Progress"],["settings","⚙️","Settings"]];
+  const items=[["train","🏋️","Train"],["cardio","🚣","Cardio"],["progress","📈","Progress"],["settings","⚙️","Settings"]];
   return (
     <div style={{position:"fixed",bottom:0,left:0,right:0,background:C.surface,borderTop:`1px solid ${C.border}`,display:"flex",zIndex:50}}>
       {items.map(([id,icon,label])=>(
